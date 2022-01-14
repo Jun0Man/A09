@@ -108,6 +108,7 @@
     DLM | NDL*        Define label on macro expansion
     RED | NRD*        
     FBG*| NFB         Fill gaps in binary output files
+    K01 | NK1*        Assemble with Konami1 opcode encryption
     * denotes default value
 
     
@@ -289,6 +290,7 @@
                       of PEMT [l]comment without expansions
                     ";@" or "*@" in LPA mode at the start of a line works like
                       an inline version of PEMT insert without expansions
+   v1.51 2022-01-15 add Konami01 encryption support (thanks to Shoestring for the original build)
 
 */
 
@@ -1835,6 +1837,7 @@ struct operandrecord
 #define OPTION_H11    0x04000000L       /* 68HC11 mode                       */
 #define OPTION_RED    0x08000000L       /* redefine label if code label, too */
 #define OPTION_FBG    0x10000000L       /* fill binary gaps                  */
+#define OPTION_K01    0x20000000L       /* Assemble with Konami 01 encryption*/
 
 struct
   {
@@ -1902,6 +1905,8 @@ struct
   { "NRD",           0, OPTION_RED },
   { "FBG",  OPTION_FBG,          0 },
   { "NFB",           0, OPTION_FBG },
+  { "K01",  OPTION_K01,          0 },
+  { "NK1",           0, OPTION_K01 },
   };
 
 unsigned long dwOptions =               /* options flags, init to default:   */
@@ -1986,6 +1991,48 @@ char *warningmsg[] =
   NULL,                                 /* 16384 WRN_WRNTXT (WRN output)     */
   ""                                    /* 32768                             */
   };
+
+/* Konami 1 decryption from Mame source. Originally reversed from a bootleg gyruss pcb by Pete */
+
+unsigned char konami1_decodebyte( unsigned char opcode, unsigned short address )
+{
+/*
+>
+> CPU_D7 = (EPROM_D7 & ~ADDRESS_1) | (~EPROM_D7 & ADDRESS_1)  >
+> CPU_D6 = EPROM_D6
+>
+> CPU_D5 = (EPROM_D5 & ADDRESS_1) | (~EPROM_D5 & ~ADDRESS_1) >
+> CPU_D4 = EPROM_D4
+>
+> CPU_D3 = (EPROM_D3 & ~ADDRESS_3) | (~EPROM_D3 & ADDRESS_3) >
+> CPU_D2 = EPROM_D2
+>
+> CPU_D1 = (EPROM_D1 & ADDRESS_3) | (~EPROM_D1 & ~ADDRESS_3) >
+> CPU_D0 = EPROM_D0
+>
+
+*/
+	if (dwOptions & OPTION_K01)
+	{
+		unsigned char xormask;
+		
+		
+		xormask = 0;
+		if (address & 0x02) 
+			xormask |= 0x80;
+		else 
+			xormask |= 0x20;
+		if (address & 0x08) 
+			xormask |= 0x08; 
+		else 
+			xormask |= 0x02;
+		
+		//printf("opcode %02x\n",opcode);
+		return opcode ^ xormask;
+	}
+	return opcode;
+
+} 
 
 /*****************************************************************************/
 /* Listing Definitions                                                       */
@@ -4888,6 +4935,21 @@ putbyte((unsigned char)(w & 0xff));
 }
 
 /*****************************************************************************/
+/* putwordop : adds an Operand word to the instruction code buffer                      */
+/*****************************************************************************/
+
+void putwordop(unsigned short w)
+{
+//    unsigned char a = w>>8;
+//    unsigned char b = w&0x0ff;
+//    a = konami1_decodebyte( a,loccounter);
+//    b = konami1_decodebyte( b,loccounter+1);
+	
+putbyte((unsigned char)konami1_decodebyte( (w >> 8),loccounter));
+putbyte((unsigned char)konami1_decodebyte( (w & 0xff),loccounter+1));
+}
+
+/*****************************************************************************/
 /* putdword : adds a doubleword to the instruction code buffer               */
 /*****************************************************************************/
 
@@ -4995,6 +5057,7 @@ if (addrelocation)
 
 void onebyte(int co)
 {
+ co = konami1_decodebyte( co,loccounter );
 putbyte((unsigned char)co);
 }
 
@@ -5004,7 +5067,7 @@ putbyte((unsigned char)co);
 
 void twobyte(int co)
 {
-putword((unsigned short)co);
+putwordop((unsigned short)co);
 }
 
 /*****************************************************************************/
@@ -5041,6 +5104,7 @@ struct relocrecord p = {0};
 scanoperands(&p);
 if (mode >= ADRMODE_POST)
   error |= ERR_ILLEGAL_ADDR;
+ co = konami1_decodebyte( co,loccounter );
 putbyte((unsigned char)co);
 
 /* addreloc(0, 2, p); */                /* no relocation for immediate op's  */
@@ -5086,6 +5150,7 @@ if (!unknown && (offs < -128 || offs >= 128))
   error |= ERR_RANGE;
 if (pass == 2 && unknown)
   error |= ERR_LABEL_UNDEF;
+ co = konami1_decodebyte( co,loccounter );
 putbyte((unsigned char)co);
 putbyte((unsigned char)offs);
 }
@@ -5102,6 +5167,7 @@ int nDiff;
 scanoperands(&p);
 if (mode != ADRMODE_DIR && mode != ADRMODE_EXT)
   error |= ERR_ILLEGAL_ADDR;
+ co = konami1_decodebyte( co,loccounter );
 putbyte((unsigned char)co);
 
 nDiff = operand - (loccounter + phase) - 3;
@@ -5123,7 +5189,7 @@ int nDiff;
 scanoperands(&p);
 if (mode != ADRMODE_DIR && mode != ADRMODE_EXT)
   error |= ERR_ILLEGAL_ADDR;
-putword((unsigned short)co);
+putwordop((unsigned short)co);
 nDiff = operand - (loccounter + phase) - 4;
 putword((unsigned short)nDiff);
 if (((nDiff & 0xff80) == 0x0000) ||
@@ -5145,17 +5211,21 @@ switch (mode)
   case ADRMODE_IMM :
     if (noimm)
       error |= ERR_ILLEGAL_ADDR;
+ co = konami1_decodebyte( co,loccounter );
     opsize = 2;
     putbyte((unsigned char)co);
     break;
   case ADRMODE_DIR :
-    putbyte((unsigned char)(co + 0x010));
+ co = konami1_decodebyte( co + 0x010,loccounter );
+    putbyte((unsigned char)(co ));
     break;
   case ADRMODE_EXT :
-    putbyte((unsigned char)(co + 0x030));
+ co = konami1_decodebyte( co + 0x030,loccounter );
+    putbyte((unsigned char)(co));
     break;
   default:
-    putbyte((unsigned char)(co + 0x020));
+ co = konami1_decodebyte( co + 0x020,loccounter );
+    putbyte((unsigned char)(co));
   }
 doaddress(&p);
 }
@@ -5212,16 +5282,19 @@ switch (mode)
   case ADRMODE_IMM :
     error |= ERR_ILLEGAL_ADDR;
     opsize = 3;
+    co = konami1_decodebyte( co,loccounter );
     putbyte((unsigned char)co);
     break;
   case ADRMODE_DIR :
     mode = ADRMODE_EXT;                 /* implicitly convert to extended    */
     /* fall thru to... */
   case ADRMODE_EXT :
-    putbyte((unsigned char)(co + 0x030));
+ co = konami1_decodebyte( co + 0x030,loccounter );
+    putbyte((unsigned char)(co));
     break;
   default:
-    putbyte((unsigned char)(co + 0x020));
+ co = konami1_decodebyte( co + 0x020,loccounter );
+    putbyte((unsigned char)(co));
     break;
  }
 doaddress(&p);
@@ -5241,17 +5314,21 @@ switch (mode)
   case ADRMODE_IMM :
     if (noimm)
       error |= ERR_ILLEGAL_ADDR;
+ co = konami1_decodebyte( co,loccounter );
     opsize = 3;
     putbyte((unsigned char)co);
     break;
   case ADRMODE_DIR :
-    putbyte((unsigned char)(co + 0x010));
+ co = konami1_decodebyte( co + 0x010,loccounter );
+    putbyte((unsigned char)(co));
     break;
   case ADRMODE_EXT :
-    putbyte((unsigned char)(co + 0x030));
+ co = konami1_decodebyte( co + 0x030,loccounter );
+    putbyte((unsigned char)(co));
     break;
   default:
-    putbyte((unsigned char)(co + 0x020));
+ co = konami1_decodebyte( co + 0x020,loccounter );
+    putbyte((unsigned char)(co));
     if (dwOptions & OPTION_H11)         /* specials for 68HC11 page bytes    */
       {
       if ((codebuf[0] == 0x18) &&
@@ -5294,16 +5371,16 @@ switch (mode)
     if (noimm)
       error |= ERR_ILLEGAL_ADDR;
     opsize = 3;
-    putword((unsigned short)co);
+    putwordop((unsigned short)co);
     break;
   case ADRMODE_DIR :
-    putword((unsigned short)(co + 0x010));
+    putwordop((unsigned short)(co + 0x010));
     break;
   case ADRMODE_EXT :
-    putword((unsigned short)(co + 0x030));
+    putwordop((unsigned short)(co + 0x030));
     break;
   default:
-    putword((unsigned short)(co + 0x020));
+    putwordop((unsigned short)(co + 0x020));
  }
 doaddress(&p);
 }
@@ -5326,13 +5403,13 @@ switch (mode)
     putbyte((unsigned char)0xcd);       /* this can ONLY be LDQ!             */
     break;
   case ADRMODE_DIR :
-    putword((unsigned short)(co + 0x010));
+    putwordop((unsigned short)(co + 0x010));
     break;
   case ADRMODE_EXT :
-    putword((unsigned short)(co + 0x030));
+    putwordop((unsigned short)(co + 0x030));
     break;
   default:
-    putword((unsigned short)(co + 0x020));
+    putwordop((unsigned short)(co + 0x020));
     break;
  }
 doaddress(&p);
@@ -5374,14 +5451,18 @@ switch (mode)
     if ((dwOptions & OPTION_M00) &&     /* on MC6800, a DIRect JMP is not OK */
         (co == 0x0e))
       error |= ERR_ILLEGAL_ADDR;
-    else
+    else {
+ co = konami1_decodebyte( co,loccounter );
       putbyte((unsigned char)co);
+	}
     break;
   case ADRMODE_EXT :
-    putbyte((unsigned char)(co + 0x70));
+ co = konami1_decodebyte( co + 0x70,loccounter );
+  	putbyte((unsigned char)(co));
     break;
   default:
-    putbyte((unsigned char)(co + 0x60));
+ co = konami1_decodebyte( co + 0x60,loccounter );
+    putbyte((unsigned char)(co));
     break;
   }
 doaddress(&p);
@@ -5421,10 +5502,13 @@ switch (mode)
     mode = ADRMODE_EXT;                 /* silently convert to extended      */
     /* fall through to ... */
   case ADRMODE_EXT :
-    putbyte((unsigned char)(co + 0x70));
+   co = konami1_decodebyte( co + 0x70,loccounter );
+    putbyte((unsigned char)(co));
     break;
   default:
-    putbyte((unsigned char)(co + 0x60));
+   co = konami1_decodebyte( co + 0x60,loccounter );
+
+    putbyte((unsigned char)(co));
     break;
   }
 doaddress(&p);
@@ -5437,6 +5521,8 @@ doaddress(&p);
 void tfrexg(int co)
 {
 struct regrecord * p;
+
+ co = konami1_decodebyte( co,loccounter );
 
 putbyte((unsigned char)co);
 skipspace();
@@ -5472,6 +5558,7 @@ void pshpul(int co)
 {
 struct regrecord *p;
 struct relocrecord sp = {0};
+ co = konami1_decodebyte( co,loccounter );
 
 putbyte((unsigned char)co);
 postbyte = 0;
@@ -5682,7 +5769,7 @@ if (i >= (sizeof(modes) / sizeof(modes[0])))
 else
   co |= i;
 
-putword((unsigned short)co);
+putwordop((unsigned short)co);
 putbyte((unsigned char)((reg1 << 4) | reg2));
 }
 
@@ -5719,10 +5806,13 @@ switch (mode)
     error |= ERR_ILLEGAL_ADDR;
     break;
   case ADRMODE_DIR :
+   co = konami1_decodebyte( co,loccounter );
+
     putbyte((unsigned char)(co));
     break;
   default:
-    putbyte((unsigned char)(co + 0x08));
+ co = konami1_decodebyte( co + 0x08,loccounter );
+    putbyte((unsigned char)(co));
     break;
   }
 doaddress(&p);
@@ -5792,10 +5882,13 @@ switch (mode)
     error |= ERR_ILLEGAL_ADDR;
     break;
   case ADRMODE_DIR :
+   co = konami1_decodebyte( co,loccounter );
+
     putbyte((unsigned char)(co));
     break;
   default:
-    putbyte((unsigned char)(co + 0x0c));
+ co = konami1_decodebyte( co + 0x0c,loccounter );
+    putbyte((unsigned char)(co));
     break;
   }
 
